@@ -12,9 +12,11 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 
-#define MAX_IN_CRIT_REGION 8
+#define MAX_IN_CRIT_REGION 7
 #define MAX_LENGTH_SEM_LIST 100
-#define MAX_SEMS 20
+#define MAX_PIPE 20
+#define READ_END 0
+#define WRITE_END 1
 
 typedef struct LOCK{
 	int nr;
@@ -25,46 +27,34 @@ typedef struct COND{
 	int semList[MAX_LENGTH_SEM_LIST+1];//maximum 100 waiting
 }pthread_cond;
 
-int critical,sem_id1,sem_id2,nrLock=-1,nrCond=-1;
+int critical,nrLock=-1,nrCond=-1,fd_mutex[MAX_PIPE+1][2],fd_cond[MAX_PIPE+1][2];
 pthread_lock lock;
 pthread_cond cond;
-
-void P(int semId, int semNr)
-{
-	struct sembuf op = {semNr, -1, 0};
-	semop(semId, &op, 1);
-}
-
-void V(int semId, int semNr)
-{
-	struct sembuf op = {semNr, +1, 0};
-	semop(semId, &op, 1);
-}
-
-
 
 /*IMPORTANT
 initMutex() function is not sincronyzed itself so it should not be called in threads etc.
 */
 void initMutex(pthread_lock *lock){
-	if(nrLock>=MAX_SEMS){
+	if(nrLock>=MAX_PIPE){
 		printf("Cannot create more locks\n");
 		return;
 	}
 	nrLock++;
-	semctl(sem_id1,nrLock, SETVAL, 1);
+	pipe(fd_mutex[nrLock]);
+	write(fd_mutex[nrLock][WRITE_END],"a",1);//initialise it with 1
 	lock->nr=nrLock;
 }
 
 void lock_mutex(pthread_lock *lock)
 {
-	P(sem_id1,lock->nr);
+	char c;
+	read(fd_mutex[nrLock][READ_END],&c,1);
 }
 
 
 void unlock_mutex(pthread_lock *lock)
 {
-	V(sem_id1,lock->nr);
+	write(fd_mutex[nrLock][WRITE_END],"a",1);
 }
 
 void initCond(pthread_cond *cond){
@@ -74,38 +64,39 @@ void initCond(pthread_cond *cond){
 void wait_cond(pthread_cond *cond,pthread_lock *lock)
 {
 	unlock_mutex(lock);
-	if(nrCond>=MAX_SEMS){
+	if(nrCond>=MAX_PIPE){
 		printf("Cannot create more conditional variables\n");
 		return;
 	}
 	nrCond++;
-	semctl(sem_id2,nrCond,SETVAL, 0);
+	pipe(fd_cond[nrCond]);
 	if(cond->semIndex>=MAX_LENGTH_SEM_LIST){
 		printf("Cannot add more items into condition variable's list\n");
 		return;
 	}
-	//add a semaphore to the list
+	//add a 'semaphore' to the list
 	cond->semList[++cond->semIndex]=nrCond;
-	P(sem_id2,nrCond);
+	char c;
+	read(fd_cond[nrCond][READ_END],&c,1);
 	lock_mutex(lock);
 }
 
 void cond_signal(pthread_cond *cond)
 {
-	//if semaphore list not empty
+	//if 'semaphore' list not empty
 	if(cond->semIndex>=0){
-		//get last semaphore from list and remove it
-		V(sem_id2,cond->semList[cond->semIndex]);
+		//get last 'semaphore' from list and remove it
+		write(fd_cond[cond->semList[cond->semIndex]][WRITE_END],"a",1);
 		cond->semIndex--;
 	}
 }
 
 void cond_broadcast(pthread_cond *cond)
 {
-	//signal all semaphores in the list and then remove them
+	//signal all 'semaphores' in the list and then remove them
 	int i;
 	for(i=0;i<=cond->semIndex;i++){
-		V(sem_id2,cond->semList[i]);
+		write(fd_cond[cond->semList[i]][WRITE_END],"a",1);
 	}
 	cond->semIndex=-1;
 }
@@ -136,8 +127,6 @@ int main(int argc, char *argv[])
 {
 	int i=0;
 	pthread_t t[10];
-	sem_id1 = semget(IPC_PRIVATE, MAX_SEMS+1, IPC_CREAT | 0600);
-	sem_id2 = semget(IPC_PRIVATE, MAX_SEMS+1, IPC_CREAT | 0600);
 	initMutex(&lock);
 	initCond(&cond);
 	srand(time(NULL));
